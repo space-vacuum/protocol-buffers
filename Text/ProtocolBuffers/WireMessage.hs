@@ -1,4 +1,7 @@
 {-# Language BangPatterns #-}
+
+{-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-}
+
 {- | 
 Here are the serialization and deserialization functions.
 

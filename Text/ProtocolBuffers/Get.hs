@@ -78,7 +78,11 @@ import Control.Monad(ap)                             -- instead of Functor.fmap;
 import qualified Control.Monad.Fail as Fail
 import Data.Bits(Bits((.|.),(.&.)),shiftL)
 import qualified Data.ByteString as S(concat,length,null,splitAt,findIndex)
+#if MIN_VERSION_bytestring(0,11,0)
+import qualified Data.ByteString.Internal as S(ByteString(..),toForeignPtr,accursedUnutterablePerformIO)
+#else
 import qualified Data.ByteString.Internal as S(ByteString(..),toForeignPtr,inlinePerformIO)
+#endif
 import qualified Data.ByteString.Unsafe as S(unsafeIndex,unsafeDrop {-,unsafeTake-})
 import qualified Data.ByteString.Lazy as L(take,drop,length,span,toChunks,fromChunks,null,findIndex)
 import qualified Data.ByteString.Lazy.Internal as L(ByteString(..),chunk)
@@ -91,13 +95,26 @@ import Foreign.Ptr(Ptr,castPtr,plusPtr,minusPtr,nullPtr)
 import Foreign.Storable(Storable(peek,sizeOf))
 import System.IO.Unsafe(unsafePerformIO)
 #if defined(__GLASGOW_HASKELL__) && !defined(__HADDOCK__)
+#if MIN_VERSION_base(4,16,4)
+import GHC.Base(Int(..),uncheckedShiftLWord16#,uncheckedShiftLWord32#)
+#else
 import GHC.Base(Int(..),uncheckedShiftL#)
+#endif
 import GHC.Word(Word16(..),Word32(..),Word64(..),uncheckedShiftL64#)
 #endif
 --import Debug.Trace(trace)
 
 trace :: a -> b -> b
 trace _ = id
+
+
+bsPerformIO :: IO a -> a
+bsPerformIO =
+#if MIN_VERSION_bytestring(0,11,0)
+  S.accursedUnutterablePerformIO
+#else
+  S.inlinePerformIO
+#endif
 
 -- Simple external return type
 data Result a = Failed {-# UNPACK #-} !Int64 String
@@ -780,9 +797,12 @@ instance Functor Get where
   fmap f m = Get (\sc -> unGet m (sc . f))
   {-# INLINE fmap #-}
 
+instance Applicative Get where
+  pure a = seq a $ Get (\sc -> sc a)
+  {-# INLINE pure #-}
+  (<*>) = ap
+
 instance Monad Get where
-  return a = seq a $ Get (\sc -> sc a)
-  {-# INLINE return #-}
   m >>= k  = Get (\sc -> unGet m (\ a -> seq a $ unGet (k a) sc))
   {-# INLINE (>>=) #-}
 #if !MIN_VERSION_base(4,11,0)
@@ -808,10 +828,6 @@ instance MonadError String Get where
 instance MonadPlus Get where
   mzero = throwError (strMsg "[mzero:no message]")
   mplus m1 m2 = catchError m1 (const m2)
-
-instance Applicative Get where
-  pure = return
-  (<*>) = ap
 
 instance Alternative Get where
   empty = mzero
@@ -842,7 +858,7 @@ splitAtOrDie i (L.Chunk x xs) | i < len = let (pre,post) = S.splitAt (fromIntegr
 getPtr :: (Storable a) => Int -> Get a
 getPtr n = do
     (fp,o,_) <- fmap S.toForeignPtr (getByteString n)
-    return . S.inlinePerformIO $ withForeignPtr fp $ \p -> peek (castPtr $ p `plusPtr` o)
+    return . bsPerformIO $ withForeignPtr fp $ \p -> peek (castPtr $ p `plusPtr` o)
 {-# INLINE getPtr #-}
 
 -- I pushed the sizeOf into here (uses ScopedTypeVariables)
@@ -850,7 +866,7 @@ getPtr n = do
 getStorable :: forall a. (Storable a) => Get a
 getStorable = do
     (fp,o,_) <- fmap S.toForeignPtr (getByteString (sizeOf (undefined :: a)))
-    return . S.inlinePerformIO $ withForeignPtr fp $ \p -> peek (castPtr $ p `plusPtr` o)
+    return . bsPerformIO $ withForeignPtr fp $ \p -> peek (castPtr $ p `plusPtr` o)
 {-# INLINE getStorable #-}
 
 ------------------------------------------------------------------------
@@ -861,6 +877,11 @@ shiftl_w16 :: Word16 -> Int -> Word16
 shiftl_w32 :: Word32 -> Int -> Word32
 shiftl_w64 :: Word64 -> Int -> Word64
 
+#if MIN_VERSION_base(4,15,0)
+shiftl_w16 (W16# w) (I# i) = W16# (w `uncheckedShiftLWord16#`   i)
+shiftl_w32 (W32# w) (I# i) = W32# (w `uncheckedShiftLWord32#`   i)
+shiftl_w64 (W64# w) (I# i) = W64# (w `uncheckedShiftL64#` i)
+#else
 #if defined(__GLASGOW_HASKELL__) && !defined(__HADDOCK__)
 shiftl_w16 (W16# w) (I# i) = W16# (w `uncheckedShiftL#`   i)
 shiftl_w32 (W32# w) (I# i) = W32# (w `uncheckedShiftL#`   i)
@@ -876,4 +897,5 @@ shiftl_w64 (W64# w) (I# i) = W64# (w `uncheckedShiftL#` i)
 shiftl_w16 = shiftL
 shiftl_w32 = shiftL
 shiftl_w64 = shiftL
+#endif
 #endif
